@@ -14,7 +14,11 @@ from config import (
     DB_DIR,
     COLLECTION_NAME,
     TOP_K_RESULTS,
-    SIMILARITY_THRESHOLD
+    SIMILARITY_THRESHOLD,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
+    LOCAL_EMBEDDING_MODEL,
+    USE_LOCAL_EMBEDDINGS
 )
 
 
@@ -22,7 +26,20 @@ class VectorStore:
     """Manages vector embeddings and similarity search"""
     
     def __init__(self):
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        # Initialize Client based on configuration
+        if DEEPSEEK_API_KEY:
+            self.client = OpenAI(
+                api_key=DEEPSEEK_API_KEY,
+                base_url=DEEPSEEK_BASE_URL
+            )
+        else:
+            self.client = OpenAI(api_key=OPENAI_API_KEY)
+            
+        # Initialize Local Embedding Model if configured
+        self.embedding_model = None
+        if USE_LOCAL_EMBEDDINGS:
+            from sentence_transformers import SentenceTransformer
+            self.embedding_model = SentenceTransformer(LOCAL_EMBEDDING_MODEL)
         
         # Initialize ChromaDB
         self.chroma_client = chromadb.PersistentClient(
@@ -38,7 +55,7 @@ class VectorStore:
     
     def generate_embedding(self, text: str) -> List[float]:
         """
-        Generate embedding for text using OpenAI
+        Generate embedding for text
         
         Args:
             text: Input text
@@ -47,11 +64,17 @@ class VectorStore:
             Embedding vector
         """
         try:
-            response = self.client.embeddings.create(
-                model=EMBEDDING_MODEL,
-                input=text
-            )
-            return response.data[0].embedding
+            if USE_LOCAL_EMBEDDINGS and self.embedding_model:
+                # Use local sentence-transformers
+                embedding = self.embedding_model.encode(text)
+                return embedding.tolist()
+            else:
+                # Use OpenAI API
+                response = self.client.embeddings.create(
+                    model=EMBEDDING_MODEL,
+                    input=text
+                )
+                return response.data[0].embedding
         except Exception as e:
             raise Exception(f"Error generating embedding: {str(e)}")
     
@@ -69,26 +92,46 @@ class VectorStore:
         metadatas = []
         ids = []
         
-        for i, chunk in enumerate(chunks):
-            # Generate embedding
-            embedding = self.generate_embedding(chunk['text'])
-            
-            documents.append(chunk['text'])
-            embeddings.append(embedding)
-            metadatas.append(chunk['metadata'])
-            ids.append(f"chunk_{chunk['chunk_id']}")
-            
-            # Progress indicator
-            if (i + 1) % 10 == 0:
-                print(f"Processed {i + 1}/{len(chunks)} chunks")
+        texts = [chunk['text'] for chunk in chunks]
         
-        # Add to ChromaDB
-        self.collection.add(
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-            ids=ids
-        )
+        # Generate embeddings
+        if USE_LOCAL_EMBEDDINGS and self.embedding_model:
+            print("Generating embeddings in batch (local model)...")
+            embeddings_array = self.embedding_model.encode(texts, show_progress_bar=True)
+            embeddings = embeddings_array.tolist()
+        else:
+            print("Generating embeddings using API...")
+            for i, text in enumerate(texts):
+                embedding = self.generate_embedding(text)
+                embeddings.append(embedding)
+                if (i + 1) % 10 == 0:
+                    print(f"Processed {i + 1}/{len(chunks)} chunks")
+        
+        # Prepare other data
+        for i, chunk in enumerate(chunks):
+            documents.append(chunk['text'])
+            metadatas.append(chunk['metadata'])
+            # Create a unique ID combining filename and chunk index
+            unique_id = f"{chunk['metadata']['filename']}_{chunk['chunk_id']}"
+            # Remove spaces and special chars from ID to be safe
+            unique_id = "".join(c for c in unique_id if c.isalnum() or c in "_-")
+            ids.append(unique_id)
+        
+        # Add to ChromaDB in batches to avoid payload size issues
+        batch_size = 500
+        total_batches = (len(documents) + batch_size - 1) // batch_size
+        
+        print(f"\nInserting into ChromaDB in {total_batches} batches...")
+        
+        for i in range(0, len(documents), batch_size):
+            end = min(i + batch_size, len(documents))
+            self.collection.add(
+                documents=documents[i:end],
+                embeddings=embeddings[i:end],
+                metadatas=metadatas[i:end],
+                ids=ids[i:end]
+            )
+            print(f"Inserted batch {i//batch_size + 1}/{total_batches}")
         
         print(f"Successfully added {len(chunks)} chunks to vector store")
     

@@ -31,7 +31,7 @@ venv.bak/
 .env
 
 # Vector Database
-vector_db/
+# vector_db/
 
 # Uploaded Files
 uploads/*.pdf
@@ -60,3 +60,12 @@ htmlcov/
 # Project specific
 *.db
 *.sqlite
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/package-lock.json
+
+# Keep README_HF.md for deployment
+!README_HF.md
